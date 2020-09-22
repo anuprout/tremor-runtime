@@ -20,7 +20,7 @@ use std::time::Duration;
 use tungstenite::protocol::Message;
 use url::Url;
 
-type WsAddr = Sender<(Ids, WsMessage)>;
+type WsAddr = Sender<(Ids, OpMeta, WsMessage)>;
 
 enum WsMessage {
     Binary(Vec<u8>),
@@ -41,13 +41,14 @@ pub struct Ws {
     config: Config,
     postprocessors: Postprocessors,
     rx: Receiver<WSResult>,
+    merged_meta: OpMeta,
 }
 
 enum WSResult {
     Connected(WsAddr),
     Disconnected,
-    Ack(Ids),
-    Fail(Ids),
+    Ack(Ids, OpMeta),
+    Fail(Ids, OpMeta),
 }
 
 impl Default for WSResult {
@@ -68,7 +69,7 @@ async fn ws_loop(url: String, offramp_tx: Sender<WSResult>) -> Result<()> {
         let (tx, rx) = bounded(crate::QSIZE);
         offramp_tx.send(WSResult::Connected(tx)).await?;
 
-        while let Ok((id, msg)) = rx.recv().await {
+        while let Ok((id, meta, msg)) = rx.recv().await {
             let r = match msg {
                 WsMessage::Text(t) => ws_stream.send(Message::Text(t)).await,
                 WsMessage::Binary(t) => ws_stream.send(Message::Binary(t)).await,
@@ -78,10 +79,10 @@ async fn ws_loop(url: String, offramp_tx: Sender<WSResult>) -> Result<()> {
                     "Websocket send error: {} for endppoint {}, reconnecting",
                     e, url
                 );
-                offramp_tx.send(WSResult::Fail(id)).await?;
+                offramp_tx.send(WSResult::Fail(id, meta)).await?;
                 break;
             } else {
-                offramp_tx.send(WSResult::Ack(id)).await?;
+                offramp_tx.send(WSResult::Ack(id, meta)).await?;
             }
         }
     }
@@ -102,6 +103,7 @@ impl offramp::Impl for Ws {
                 config,
                 postprocessors: vec![],
                 rx,
+                merged_meta: OpMeta::default(),
             }))
         } else {
             Err("[WS Offramp] Offramp requires a config".into())
@@ -117,14 +119,29 @@ impl Ws {
             match self.rx.recv().await? {
                 WSResult::Connected(addr) => {
                     self.addr = Some(addr);
-                    v.push(Event::cb_restore(ingest_ns));
+                    let mut e = Event::cb_restore(ingest_ns);
+                    e.op_meta = self.merged_meta.clone();
+                    v.push(e);
                 }
                 WSResult::Disconnected => {
                     self.addr = None;
-                    v.push(Event::cb_trigger(ingest_ns));
+                    let mut e = Event::cb_trigger(ingest_ns);
+                    e.op_meta = self.merged_meta.clone();
+                    v.push(e);
                 }
-                WSResult::Ack(id) => v.push(Event::cb_ack(ingest_ns, id.clone())),
-                WSResult::Fail(id) => v.push(Event::cb_fail(ingest_ns, id.clone())),
+                WSResult::Ack(id, op_meta) => v.push(Event {
+                    ingest_ns,
+                    id: id.clone(),
+                    op_meta,
+                    cb: CBAction::Ack,
+                    ..Event::default()
+                }),
+                WSResult::Fail(id, op_meta) => v.push(Event {
+                    id: id.clone(),
+                    op_meta,
+                    cb: CBAction::Fail,
+                    ..Event::default()
+                }),
             }
         }
         Ok(Some(v))
@@ -147,16 +164,26 @@ impl Sink for Ws {
 
     #[allow(clippy::used_underscore_binding)]
     async fn on_event(&mut self, _input: &str, codec: &dyn Codec, event: Event) -> ResultVec {
+        self.merged_meta.merge(event.op_meta.clone());
         if let Some(addr) = &self.addr {
             for value in event.value_iter() {
                 let raw = codec.encode(value)?;
                 let datas = postprocess(&mut self.postprocessors, event.ingest_ns, raw)?;
                 for raw in datas {
                     if self.config.binary {
-                        addr.send((event.id.clone(), WsMessage::Binary(raw)))
-                            .await?;
+                        addr.send((
+                            event.id.clone(),
+                            event.op_meta.clone(),
+                            WsMessage::Binary(raw),
+                        ))
+                        .await?;
                     } else if let Ok(txt) = String::from_utf8(raw) {
-                        addr.send((event.id.clone(), WsMessage::Text(txt))).await?;
+                        addr.send((
+                            event.id.clone(),
+                            event.op_meta.clone(),
+                            WsMessage::Text(txt),
+                        ))
+                        .await?;
                     } else {
                         error!("[WS Offramp] Invalid utf8 data for text message");
                         return Err(Error::from("Invalid utf8 data for text message"));
