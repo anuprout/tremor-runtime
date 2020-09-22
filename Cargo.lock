@@ -4789,6 +4789,7 @@ dependencies = [
  "simd-json",
  "simd-json-derive",
  "sled",
+ "tempfile",
  "tremor-influx",
  "tremor-script",
  "value-trait",
