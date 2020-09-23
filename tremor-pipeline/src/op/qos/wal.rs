@@ -140,8 +140,7 @@ pub struct Config {
     pub max_bytes: u64,
 
     /// Flush to disk on every write
-    #[serde(default = "Default::default")]
-    flush_on_evnt: bool,
+    flush_on_evnt: Option<bool>,
 }
 
 impl ConfigImpl for Config {}
@@ -263,7 +262,7 @@ impl WAL {
         // Sieralize and write the event
         let event_buf = event.json_vec()?;
         self.events_tree.insert(write, event_buf.as_slice())?;
-        if self.config.flush_on_evnt {
+        if self.config.flush_on_evnt.unwrap_or_default() {
             self.events_tree.flush()?;
         }
         self.cnt += 1;
@@ -420,6 +419,7 @@ mod test {
             dir: None,
             max_elements: 10,
             max_bytes: 1024 * 1024,
+            flush_on_evnt: None,
         };
         let mut o = WalFactory::new().from_node(&NodeConfig::from_config("test", c)?)?;
         let mut v = Value::null();
@@ -484,6 +484,7 @@ mod test {
             dir: Some(temp_dir.path().to_string_lossy().into_owned()),
             max_elements: 10,
             max_bytes: 1024 * 1024,
+            flush_on_evnt: None,
         };
 
         let mut v = Value::null();
