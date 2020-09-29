@@ -4745,6 +4745,7 @@ dependencies = [
  "tremor-pipeline",
  "tremor-runtime",
  "tremor-script",
+ "url 2.1.1",
 ]
 
 [[package]]
